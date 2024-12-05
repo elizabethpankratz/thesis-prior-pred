@@ -1,0 +1,487 @@
+---
+title: "Thesis appendix A: Prior predictive checks"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, message = FALSE}
+library(tidyverse)
+library(brms)
+library(patchwork)
+
+# dplyr and ggplot settings
+options(dplyr.summarise.inform = FALSE)
+theme_set(theme_bw())
+
+# font size for normal use
+theme_update(text = element_text(family = "Fira Sans", size=8),
+             axis.title.y = element_text(angle=0, vjust=0.5),
+             panel.grid = element_blank(),
+             strip.text = element_text(size = 8),
+             strip.background = element_blank())
+
+cbpalette <- c("#3173c9", "#ed7a1d", "#51b375", "#FFCD29", "#1c4a84", "#bb3725", "#ff94b0")
+```
+
+
+# Intercept prior
+
+```{r}
+plot_logodds_to_prob <- function(logodds_data, distrib_str){
+  # logodds_data: vector of numbers in log-odds space
+  # distrib_str: a string description of the log-odds distribution (for plot title)
+  
+  facet_labels <- c(
+    log_odds = paste(distrib_str, 'in log-odds space'),
+    prob     = paste('Logistic(', distrib_str, ') in probability space')
+  )
+  tibble(log_odds = logodds_data) %>%
+    mutate(prob = plogis(log_odds)) %>% 
+    pivot_longer(cols=everything(), names_to = 'scale', values_to = 'sim') %>% 
+    ggplot(aes(x=sim)) +
+    facet_wrap(~ scale, scales = 'free',
+               labeller = as_labeller(facet_labels)) +
+    geom_density(fill=cbpalette[1], colour = cbpalette[1], alpha = 0.3) +
+    labs(
+      x = element_blank(),
+      y = 'Prob.\ndens.'
+    ) +
+    theme(axis.ticks.y = element_blank(),
+          axis.text.y = element_blank(),
+    ) +
+    NULL
+}
+
+plot_logodds_to_prob(rnorm(100000, 0, 1.5), 'Normal(0, 1.5)')
+
+# ggsave('../figs/intercept-prior.svg', width = 14, height = 5, units = 'cm')
+```
+
+
+
+# LKJ Prior
+
+```{r}
+tibble(
+  dens = dbeta(seq(0, 1, length.out = 100), 2, 2),
+  beta = seq(0, 1, length.out = 100),
+  rho = seq(-1, 1, length.out = 100),
+  prior = 'LKJ(2)'
+) %>%
+  ggplot(aes(x=rho, y=dens)) +
+  facet_wrap(~ prior) +
+  geom_density(fill=cbpalette[1], colour = cbpalette[1], alpha = 0.3, stat = 'identity') +
+  labs(
+    # x = 'rho',
+    x = element_blank(),
+    y = 'Prob.\ndens.'
+  ) +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid = element_blank()) +
+  NULL
+
+# ggsave('../figs/lkj-prior.svg', width = 6, height = 5, units = 'cm')
+```
+
+
+# Chapter 2 (SL)
+
+## b * sd priors
+
+### Run parameter grid
+
+```{r}
+beta_sds <- c(1, 1.5, 2)
+tau_sds  <- c(3, 5, 10) # actually for both tau and w
+```
+
+```{r eval=FALSE}
+# Init list to gather the posterior means.
+prpred_means <- list()
+
+for(b_sd in beta_sds){
+  for(t_sd in tau_sds){
+    
+    # Fit a prior-only model for the current combination of SDs.
+    prior_fit <- brm(correct ~ morph + affix + len + boundary + affix_boundary + logtransfreq_c + (len + boundary | ppt_id) + (1 | target_form),
+          family = bernoulli(),
+          prior = c(
+            prior(normal(0, 1.5), class = Intercept),
+            set_prior(paste0('normal(0,', b_sd, ')'), class = 'b'),
+            set_prior(paste0('normal(0,', t_sd, ')'), class = 'sd'),
+            prior(lkj(2), class = cor, group = ppt_id)
+          ),
+          data = contr_dat,
+          backend = 'cmdstanr',
+          sample_prior = 'only',
+          file = paste0('data/model_cache/', b_sd, '-', t_sd)
+    )
+    
+    # Sample from the posterior (prior) and, to recreate pp_check(stat='mean'), 
+    # take the mean of samples in the resulting matrix.
+    pred_outcomes <- posterior_predict(prior_fit)
+    mean_pred <- sapply(1:nrow(pred_outcomes), function(i) mean(pred_outcomes[i,]))
+    
+    # Add these samples to prpred_means
+    prpred_means[[paste0('normal(0, ', b_sd, ')/normal+(0, ', t_sd, ')')]] <- mean_pred
+  }
+}
+
+prpred_df <- prpred_means %>% 
+  bind_rows() %>% 
+  pivot_longer(cols=everything(), names_to = 'priorcombo', values_to = 'mean_pred_prob') %>% 
+  separate(priorcombo, sep='/', into = c('beta_prior', 'tau_prior'))
+
+# Write to CSV.
+write.csv(prpred_df, '../data/2_sl/priorpred_paramgrid.csv', row.names = FALSE)
+```
+
+```{r}
+sl_prpred_df <- read.csv('../data/2_sl/priorpred_paramgrid.csv')
+
+# To recreate the original pp_check(stat='mean') plots, plot histograms of all the mean outcome probs.
+sl_p_paramgrid <- sl_prpred_df %>% 
+  mutate(
+    beta_prior = factor(beta_prior, levels = c('normal(0, 1)','normal(0, 1.5)','normal(0, 2)', 'normal(0, 3)')),
+    tau_prior = factor(tau_prior, levels = c('normal+(0, 3)', 'normal+(0, 5)','normal+(0, 10)','normal+(0, 20)')),
+  ) %>%
+  ggplot(aes(x=mean_pred_prob)) +
+  facet_grid(tau_prior ~ beta_prior, scales = 'free_y')+#, labeller = label_both) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous(labels = c(0, 0.25, 0.5, 0.75, 1)) +
+  labs(
+    title = 'b priors (columns) * sd priors (rows)',
+    y = 'Count',
+    x = 'Mean predicted probability of success (i.e., of a correct answer)'
+  ) +
+  NULL
+```
+
+
+### Simulate effect sizes
+
+```{r}
+# Set number of simulations to run and draw that many samples from the prior for alpha.
+nsim <- 10000
+alpha_sim <- rnorm(nsim, 0, 1.5)
+
+# Init list that will iteratively collect the dfs simulated for each beta SD below.
+sl_effectsize_list <- list()
+
+for(b_sd in beta_sds){
+  # Generate some beta values with the current SD.
+  beta_sim <- rnorm(nsim, 0, b_sd)
+  
+  # Init vector that will iteratively collect the simulated effect sizes in the for loop below.
+  sim_effects <- c()
+  
+  for(i in 1:nsim){
+    # Compute the difference between levels of the +/-0.5 sum-coded predictor. Append to effect vector.
+    eff_sum_prob <- plogis(alpha_sim[i] + (beta_sim[i] * 1/2)) - plogis(alpha_sim[i] + (beta_sim[i] * -1/2))
+    sim_effects <- c(sim_effects, eff_sum_prob)
+  }
+  
+  # Add the vectors of simulated effects to the list under the current SD.
+  sl_effectsize_list[[paste0(b_sd)]] <- sim_effects
+}
+
+sl_simeffect_df <- sl_effectsize_list %>% 
+  bind_rows() %>% 
+  pivot_longer(cols=everything(), names_to = 'beta_sd', values_to = 'sim_effect')
+
+sl_p_simeffect <- sl_simeffect_df %>% 
+  mutate(beta_prior = paste0('normal(0, ', beta_sd, ')'),
+         beta_prior = factor(beta_prior, levels = c('normal(0, 1)','normal(0, 1.5)','normal(0, 2)', 'normal(0, 3)'))) %>% 
+  ggplot(aes(x=sim_effect)) +
+  facet_wrap(~ beta_prior, nrow=1)+# labeller = label_both) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous(labels = c('–1', '–0.5', 0, 0.5, 1)) +
+  labs(title = 'Simulated effect sizes for b priors',
+       y = 'Count',
+       x = 'Simulated difference between levels of +/– 0.5 sum-coded predictor') +
+  NULL
+```
+
+
+## Plot together
+
+```{r}
+sl_p_paramgrid / sl_p_simeffect +
+  plot_layout(heights = c(3, 1)) +
+  plot_annotation(tag_levels = 'A')
+
+# ggsave('../figs/sl-grid.svg', width = 14, height = 14, units = 'cm')
+```
+
+
+# Chapter 3 (AK)
+
+
+## b * sd priors
+
+### Run parameter grid
+
+```{r}
+beta_sds <- c(1, 1.5, 2)
+tau_sds  <- c(5, 10, 20)
+```
+
+```{r eval=FALSE}
+# Init list to gather the posterior means.
+prpred_means <- list()
+
+for(b_sd in beta_sds){
+  for(t_sd in tau_sds){
+    
+    # Fit a prior-only model for the current combination of SDs.
+    prior_fit <- brm(sentence_accepted ~ sent + cond + sentcond + (sent | ppt_id),
+          family = bernoulli(),
+          prior = c(
+            prior(normal(0, 1.5), class = Intercept),
+            set_prior(paste0('normal(0,', b_sd, ')'), class = 'b'),
+            set_prior(paste0('normal(0,', t_sd, ')'), class = 'sd', coef = 'Intercept', group = 'ppt_id'),
+            set_prior(paste0('normal(0,', t_sd, ')'), class = 'sd', coef = 'sent', group = 'ppt_id'),
+            prior(lkj(2), class = cor, group = ppt_id)
+          ),
+          data = judge_lm_dat,
+          backend = 'cmdstanr',
+          sample_prior = 'only',
+          file = paste0('pilot2/data/cache/', b_sd, '-', t_sd)
+    )
+    
+    # Sample from the posterior (prior) and, to recreate pp_check(stat='mean'), 
+    # take the mean of samples in the resulting matrix.
+    pred_outcomes <- posterior_predict(prior_fit)
+    mean_pred <- sapply(1:nrow(pred_outcomes), function(i) mean(pred_outcomes[i,]))
+    
+    # Add these samples to prpred_means
+    prpred_means[[paste0('normal(0, ', b_sd, ')/normal+(0, ', t_sd, ')')]] <- mean_pred
+  }
+}
+
+prpred_df <- prpred_means %>% 
+  bind_rows() %>% 
+  pivot_longer(cols=everything(), names_to = 'priorcombo', values_to = 'mean_pred_prob') %>% 
+  separate(priorcombo, sep='/', into = c('beta_prior', 'tau_prior'))
+
+# Write to CSV.
+write.csv(prpred_df, '../data/3_ak/priorpred_paramgrid.csv', row.names = FALSE)
+```
+
+```{r}
+ak_prpred_df <- read.csv('../data/3_ak/priorpred_paramgrid.csv')
+
+# To recreate the original pp_check(stat='mean') plots, plot histograms of all the mean outcome probs.
+ak_p_paramgrid <- ak_prpred_df %>% 
+  mutate(
+    beta_prior = factor(beta_prior, levels = c('normal(0, 1)','normal(0, 1.5)','normal(0, 2)')),
+    tau_prior = factor(tau_prior, levels = c('normal+(0, 5)','normal+(0, 10)','normal+(0, 20)')),
+  ) %>%
+  ggplot(aes(x=mean_pred_prob)) +
+  facet_grid(tau_prior ~ beta_prior, scales = 'free_y')+#, labeller = label_both) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous(labels = c(0, 0.25, 0.5, 0.75, 1)) +
+  labs(
+    title = 'b priors (columns) * sd priors (rows)',
+    y = 'Count',
+    x = 'Mean predicted probability of success (i.e., of accepting the sentence)'
+  ) +
+  NULL
+```
+
+
+### Effect sizes
+
+```{r}
+# Set number of simulations to run and draw that many samples from the prior for alpha.
+nsim <- 10000
+alpha_sim <- rnorm(nsim, 0, 1.5)
+
+# Init list that will iteratively collect the dfs simulated for each beta SD below.
+ak_effectsize_list <- list()
+
+for(b_sd in beta_sds){
+  # Generate some beta values with the current SD.
+  beta_sim <- rnorm(nsim, 0, b_sd)
+  
+  # Init vector that will iteratively collect the simulated effect sizes in the for loop below.
+  sim_effects <- c()
+  
+  for(i in 1:nsim){
+    # Compute the difference between levels of the +/-0.5 sum-coded predictor. Append to effect vector.
+    eff_sum_prob <- plogis(alpha_sim[i] + (beta_sim[i] * 1/2)) - plogis(alpha_sim[i] + (beta_sim[i] * -1/2))
+    sim_effects <- c(sim_effects, eff_sum_prob)
+  }
+  
+  # Add the vectors of simulated effects to the list under the current SD.
+  ak_effectsize_list[[paste0(b_sd)]] <- sim_effects
+}
+
+ak_simeffect_df <- ak_effectsize_list %>% 
+  bind_rows() %>% 
+  pivot_longer(cols=everything(), names_to = 'beta_sd', values_to = 'sim_effect')
+```
+
+```{r}
+ak_p_simeffect <- ak_simeffect_df %>% 
+  mutate(beta_prior = paste0('normal(0, ', beta_sd, ')'),
+         beta_prior = factor(beta_prior, levels = c('normal(0, 1)','normal(0, 1.5)','normal(0, 2)'))) %>% 
+  ggplot(aes(x=sim_effect)) +
+  facet_wrap(~ beta_prior, nrow=1)+# labeller = label_both) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous(labels = c('–1', '–0.5', 0, 0.5, 1)) +
+  labs(title = 'Simulated effect sizes for b priors',
+       y = 'Count',
+       x = 'Simulated difference between levels of +/– 0.5 sum-coded predictor') +
+  NULL
+```
+
+
+## Plot together
+
+```{r}
+ak_p_paramgrid / ak_p_simeffect +
+  plot_layout(heights = c(3, 1)) +
+  plot_annotation(tag_levels = 'A')
+
+# ggsave('../figs/ak-grid.svg', width = 14, height = 14, units = 'cm')
+```
+
+
+# Chapter 4 (ZE)
+
+## b * sd priors
+
+### Run parameter grid
+
+```{r}
+beta_sds <- c(1, 1.5, 2)
+adjustmt_priors <- c('normal(0, 3)', 'normal(0, 5)', 'normal(0, 10)')
+```
+
+```{r eval=FALSE}
+# Init list to gather the mean model predictions.
+pred_list <- list() 
+
+# Iterate over all combinations of beta SDs and adjustment priors.
+for(b in beta_sds){
+  for(adj_prior in adjustmt_priors){
+    
+    # Fit a prior-only model with this combination of priors.
+    prior_fit <- brm(chose_non_baseline ~ 1 + list_sumcode + (1|ppt_id),
+                     data = novel_afc_dat,
+                     family = bernoulli(link = logit),
+                     prior = c(prior(normal(0, 1.5), class = Intercept),
+                               set_prior(paste0('normal(0,', b, ')'), class = 'b'),
+                               set_prior(adj_prior, class = 'sd')),
+                     sample_prior = 'only',
+                     file = paste0('analysis/1_pilot1/modelcache/noveltest_pargrid/', b, '-', adj_prior))
+    
+    # Sample from the posterior (prior) and, to recreate pp_check(stat='mean'), 
+    # take the mean of samples in the resulting matrix.
+    pred_outcomes <- posterior_predict(prior_fit)
+    mean_pred <- sapply(1:nrow(pred_outcomes), function(i) mean(pred_outcomes[i,]))
+    
+    # Add these samples to pred_list.
+    pred_list[[paste0('normal(0, ', b, ')/', adj_prior)]] <- mean_pred
+  }
+}
+
+pred_df <- pred_list %>% 
+  bind_rows() %>% 
+  pivot_longer(cols=everything(), names_to = 'priorcombo', values_to = 'pred_prob') %>% 
+  separate(priorcombo, sep='/', into = c('beta_prior', 'adj_prior'))
+
+# Write to CSV.
+write.csv(pred_df, '../data/4_ze/noveltest_priorpred_paramgrid.csv', row.names = FALSE)
+```
+
+```{r message=FALSE}
+ze_pred_df <- read_csv('../data/4_ze/noveltest_priorpred_paramgrid.csv')
+
+# To recreate the original pp_check(stat='mean') plots, plot histograms of all the mean outcome probs.
+ze_paramgrid_novel <- ze_pred_df %>% 
+  mutate(beta_prior = factor(beta_prior, levels = c('normal(0, 1)', 'normal(0, 1.5)', 'normal(0, 2)'))) %>% 
+  mutate(adj_prior = factor(adj_prior, levels = c('normal(0, 3)', 'normal(0, 5)', 'normal(0, 10)'))) %>% 
+  ggplot(aes(x=pred_prob)) +
+  facet_grid(adj_prior ~ beta_prior, 
+             scales = 'free_y', 
+             ) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous(labels = c(0, 0.25, 0.5, 0.75, 1)) +
+  labs(
+    title = 'b priors (columns) * sd priors (rows)',
+    y = 'Count',
+    x = 'Mean probability of success (i.e., of choosing non-baseline suffix)'
+  ) +
+  NULL
+```
+
+
+### Effect sizes
+
+```{r}
+# Set number of simulations to run and draw that many samples from the priors for alpha.
+nsim <- 10000
+alpha_sim <- rnorm(nsim, 0, 1.5)
+
+# Init list that will iteratively collect the dfs simulated for each beta SD below.
+ze_effectsize_list <- list()
+
+for(b in beta_sds){
+  # Generate some beta values with the current SD.
+  beta_sim <- rnorm(nsim, 0, b)
+  
+  # Init vector that will iteratively collect the simulated effect sizes in the for loop below.
+  pred_effects <- c()
+  
+  for(i in 1:nsim){
+    # Compute the difference between levels of an unscaled sum-coded predictor. Append to effect vector.
+    eff_sum_prob <- plogis(alpha_sim[i] + (beta_sim[i] * 1/2)) - plogis(alpha_sim[i] + (beta_sim[i] * -1/2))
+    pred_effects <- c(pred_effects, eff_sum_prob)
+  }
+  
+  # Add the vectors of simulated effects to the list under the current SD.
+  ze_effectsize_list[[paste0(b)]] <- pred_effects
+}
+
+ze_simeffect_df <- ze_effectsize_list %>% 
+  bind_rows() %>% 
+  pivot_longer(cols=everything(), names_to = 'beta_sd', values_to = 'sim_effect')
+```
+
+```{r}
+ze_simeffect_novel <- ze_simeffect_df %>% 
+  mutate(beta_prior = paste0('normal(0, ', beta_sd, ')'),
+         beta_prior = factor(beta_prior, levels = c('normal(0, 1)','normal(0, 1.5)','normal(0, 2)'))) %>% 
+  ggplot(aes(x=sim_effect)) +
+  facet_wrap(~ beta_prior, 
+             nrow = 1) +
+  geom_histogram(bins = 20) +
+  scale_x_continuous(labels = c('–1', '–0.5', 0, 0.5, 1)) +
+  labs(title = 'Simulated effect sizes for b priors',
+       y = 'Count',
+       x = 'Simulated difference between levels of +/– 0.5 sum-coded predictor') +
+  NULL
+```
+
+
+## Plot together
+
+```{r}
+ze_paramgrid_novel / ze_simeffect_novel +
+  plot_layout(heights = c(3, 1)) +
+  plot_annotation(tag_levels = 'A')
+
+# ggsave('../figs/ze-grid.svg', width = 14, height = 14, units = 'cm')
+```
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
